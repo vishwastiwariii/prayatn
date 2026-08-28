@@ -15,64 +15,64 @@ Instead of blindly retrying every failed payment, Recovery Desk understands the 
 Most payment recovery systems treat failures the same way:
 
 Payment Failed
-     ↓
+↓
 Retry
-     ↓
+↓
 Retry
-     ↓
+↓
 Retry
-     ↓
+↓
 Give Up
 
 But:
 
-* Insufficient funds shouldn’t be retried 30 seconds later.
-* Temporary issuer failures may succeed after waiting.
-* 3DS abandonment needs customer intervention.
-* Expired cards should be stopped.
-* Gateway outages require a circuit breaker.
-* Revoked mandates must never be retried.
+- Insufficient funds shouldn’t be retried 30 seconds later.
+- Temporary issuer failures may succeed after waiting.
+- 3DS abandonment needs customer intervention.
+- Expired cards should be stopped.
+- Gateway outages require a circuit breaker.
+- Revoked mandates must never be retried.
 
 Blind retries waste money, increase payment attempts, and create a poor customer experience.
 
 ⸻
 
- - Our Approach
+- Our Approach
 
 Recovery Desk uses a deterministic decision pipeline:
 
 Payment Failure
-      ↓
+↓
 Root-Cause Classification
-      ↓
+↓
 Recovery Policy
-      ↓
+↓
 Safety Guardrails
-      ↓
+↓
 Retry / Wait / Switch / Message / Stop
-      ↓
+↓
 Outcome + Audit
 
 Example
 
 Bank Timeout
-     ↓
+↓
 ISSUER_TEMPORARY_FAILURE
-     ↓
+↓
 Retry after 18 minutes
-     ↓
+↓
 Guardrails checked
-     ↓
+↓
 Retry
 
 While:
 
 Mandate Revoked
-     ↓
+↓
 MANDATE_INVALID
-     ↓
+↓
 HARD STOP
-     ↓
+↓
 Cancel future retries
 
 ⸻
@@ -83,21 +83,21 @@ AI is not responsible for financial decisions.
 
 We deliberately keep:
 
-* retry eligibility
-* retry timing
-* payment execution
-* attempt limits
-* circuit breakers
-* hard stops
+- retry eligibility
+- retry timing
+- payment execution
+- attempt limits
+- circuit breakers
+- hard stops
 
 deterministic and policy-controlled.
 
 AI is used for:
 
-* customer-facing recovery messages
-* merchant-facing failure explanations
-* suggesting classifications for unknown errors
-* assisting human review
+- customer-facing recovery messages
+- merchant-facing failure explanations
+- suggesting classifications for unknown errors
+- assisting human review
 
 AI can explain a financial decision. It cannot authorize one.
 
@@ -121,13 +121,13 @@ The same seeded dataset is run through:
 
 We measure:
 
- Amount recovered
- Recovery rate
- Attempts consumed
- Cost per recovery
- Customer messages
- Hard stops
- Human reviews
+Amount recovered
+Recovery rate
+Attempts consumed
+Cost per recovery
+Customer messages
+Hard stops
+Human reviews
 
 This turns the product from “we think our approach is better” into a measurable experiment.
 
@@ -160,35 +160,35 @@ What we saw
 
 Frontend
 
- Next.js
- TypeScript
- Tailwind CSS
- shadcn/ui
- Recharts
+Next.js
+TypeScript
+Tailwind CSS
+shadcn/ui
+Recharts
 
 Backend
 
- Node.js
- Fastify
- TypeScript
- Prisma
- Zod
+Node.js
+Fastify
+TypeScript
+Prisma
+Zod
 
 Infrastructure
 
- PostgreSQL
- Redis
- BullMQ
- Docker
+PostgreSQL
+Redis
+BullMQ
+Docker
 
 AI
 
- LLM API for messaging, explanations and unknown-error assistance
+LLM API for messaging, explanations and unknown-error assistance
 
 Testing
 
- Vitest
- Playwright
+Vitest
+Playwright
 
 ⸻
 

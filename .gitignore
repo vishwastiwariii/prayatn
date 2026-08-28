@@ -1,1 +1,37 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+build/
+.next/
+out/
+*.tsbuildinfo
+
+# turborepo
+.turbo/
+
+# environment (keep .env.example tracked)
+.env
+.env.local
+.env.*.local
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# coverage
+coverage/
+
+# prisma local databases
+prisma/*.db
+
+# os / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# project-specific
 /CLAUDE.md

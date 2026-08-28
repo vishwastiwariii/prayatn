@@ -1,0 +1,14 @@
+// Phase 1 — connection verification only.
+// The real Recovery Desk schema (customers, payments, payment_failures,
+// classifications, recovery_actions, recovery_outcomes, audit_events)
+// is introduced in Phase 3. For now this only lets Prisma connect and
+// run `SELECT 1` against PostgreSQL.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
