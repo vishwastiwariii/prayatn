@@ -1,0 +1,279 @@
+// Recovery Desk — Phase 3 database schema.
+//
+// This is the production-oriented PostgreSQL schema derived from the domain
+// model in `@recovery-desk/domain` (packages/domain/src/enums.ts + models.ts).
+//
+// Pipeline: Domain Types -> Prisma Schema -> Migration -> PostgreSQL -> Repositories.
+//
+// Notes on the mapping from the domain interfaces:
+//   * Money is stored as NUMERIC(14,2) (Prisma `Decimal`), never a float.
+//   * `Customer.balanceState` and `Customer.preferredLanguage` are promoted from
+//     loose strings to enums.
+//   * `RecoveryStatus` (the workflow-level status from the domain) lives on
+//     `Payment.recoveryStatus`. Individual `recovery_actions` rows track their
+//     own lifecycle via `RecoveryActionStatus`, which the queue/worker phases
+//     need (PENDING -> SCHEDULED -> EXECUTING -> EXECUTED / CANCELLED / ...).
+//   * `audit_events` is append-only. The repository layer only exposes create +
+//     read; there is no update/delete path.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums (mirrors packages/domain/src/enums.ts)
+// ---------------------------------------------------------------------------
+
+enum PaymentMethod {
+  CARD
+  UPI
+  NETBANKING
+  WALLET
+  MANDATE
+}
+
+enum PaymentStatus {
+  PENDING
+  FAILED
+  RECOVERING
+  SUCCEEDED
+  EXHAUSTED
+  HARD_STOPPED
+}
+
+enum FailureSource {
+  CUSTOMER
+  BANK
+  GATEWAY
+  BUSINESS
+}
+
+enum FailureStep {
+  AUTHENTICATION
+  AUTHORIZATION
+  CAPTURE
+}
+
+/// Workflow-level recovery status for a payment (domain: RecoveryStatus).
+enum RecoveryStatus {
+  FAILED
+  CLASSIFIED
+  SCHEDULED
+  RETRYING
+  RECOVERED
+  HARD_STOPPED
+  EXHAUSTED
+  HUMAN_REVIEW
+}
+
+enum RootCause {
+  CUSTOMER_FUNDS_LOW
+  CUSTOMER_AUTH_FAILURE
+  CUSTOMER_ABANDONMENT
+  ISSUER_TEMPORARY_FAILURE
+  GATEWAY_FAILURE
+  PAYMENT_METHOD_INVALID
+  MANDATE_INVALID
+  UNKNOWN
+}
+
+/// The decision a policy produced (domain: RecoveryActions).
+enum RecoveryActionType {
+  RETRY
+  WAIT
+  SWITCH_RAIL
+  MESSAGE
+  HARD_STOP
+  HUMAN_REVIEW
+}
+
+/// Lifecycle of a single recovery_actions row.
+enum RecoveryActionStatus {
+  PENDING
+  SCHEDULED
+  EXECUTING
+  EXECUTED
+  CANCELLED
+  BLOCKED
+  FAILED
+}
+
+enum ClassificationSource {
+  RULE
+  LLM_SUGGESTION
+  HUMAN
+}
+
+enum RecoveryOutcomeStatus {
+  SUCCESS
+  FAILED
+  BLOCKED
+  DUPLICATE
+  CANCELLED
+}
+
+enum PreferredLanguage {
+  EN
+  HI
+  HINGLISH
+}
+
+enum CustomerBalanceState {
+  HEALTHY
+  LOW
+  CRITICAL
+  UNKNOWN
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id                String               @id @default(cuid())
+  name              String
+  email             String               @unique
+  phone             String?
+  balanceState      CustomerBalanceState @default(UNKNOWN)
+  /// Day of month (1-28) the customer is typically paid; used by funds-low policy.
+  salaryDay         Int?
+  preferredLanguage PreferredLanguage    @default(EN)
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  payments Payment[]
+
+  @@map("customers")
+}
+
+model Payment {
+  id             String          @id @default(cuid())
+  customerId     String
+  customer       Customer        @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  amount         Decimal         @db.Decimal(14, 2)
+  currency       String          @default("INR") @db.VarChar(3)
+  method         PaymentMethod
+  status         PaymentStatus   @default(PENDING)
+  /// Workflow-level recovery status; null until the payment first fails.
+  recoveryStatus RecoveryStatus?
+  attemptCount   Int             @default(0)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  failures        PaymentFailure[]
+  recoveryActions RecoveryAction[]
+  auditEvents     AuditEvent[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([recoveryStatus])
+  @@map("payments")
+}
+
+model PaymentFailure {
+  id               String        @id @default(cuid())
+  paymentId        String
+  payment          Payment       @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  // Flattened GatewayError (domain: GatewayError).
+  errorCode        String
+  errorReason      String
+  errorSource      FailureSource
+  errorStep        FailureStep
+  errorDescription String
+  rawPayload       Json?
+  /// Ingestion idempotency key (Idempotency-Key header in Phase 4).
+  idempotencyKey   String?       @unique
+  occurredAt       DateTime      @default(now())
+  createdAt        DateTime      @default(now())
+
+  classifications Classification[]
+
+  @@index([paymentId])
+  @@index([errorReason])
+  @@index([occurredAt])
+  @@map("payment_failures")
+}
+
+model Classification {
+  id                String               @id @default(cuid())
+  failureId         String
+  failure           PaymentFailure       @relation(fields: [failureId], references: [id], onDelete: Cascade)
+  cause             RootCause
+  confidence        Float
+  ruleId            String?
+  classifierVersion String
+  source            ClassificationSource @default(RULE)
+  evidence          String[]
+  createdAt         DateTime             @default(now())
+
+  @@index([failureId])
+  @@index([cause])
+  @@map("classifications")
+}
+
+model RecoveryAction {
+  id             String               @id @default(cuid())
+  paymentId      String
+  payment        Payment              @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  cause          RootCause
+  action         RecoveryActionType
+  status         RecoveryActionStatus @default(PENDING)
+  attemptNumber  Int
+  scheduledFor   DateTime?
+  /// Human-readable justification copied from the policy decision.
+  reason         String?
+  delayMinutes   Int?
+  maxAttempts    Int?
+  /// Guarantees an action is executed at most once (Phase 9 idempotency layer).
+  idempotencyKey String               @unique
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  executedAt     DateTime?
+
+  outcome RecoveryOutcome?
+
+  @@index([paymentId])
+  @@index([status, scheduledFor])
+  @@map("recovery_actions")
+}
+
+model RecoveryOutcome {
+  id               String                @id @default(cuid())
+  actionId         String                @unique
+  action           RecoveryAction        @relation(fields: [actionId], references: [id], onDelete: Cascade)
+  status           RecoveryOutcomeStatus
+  amountRecovered  Decimal               @default(0) @db.Decimal(14, 2)
+  gatewayLatencyMs Int?
+  failureReason    String?
+  occurredAt       DateTime              @default(now())
+
+  @@index([status])
+  @@index([occurredAt])
+  @@map("recovery_outcomes")
+}
+
+/// Append-only. Never updated or deleted.
+model AuditEvent {
+  id              String   @id @default(cuid())
+  paymentId       String?
+  payment         Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  eventType       String
+  whatWeSaw       String
+  whatWeConcluded String
+  whatWasAllowed  String
+  whatWeDid       String
+  whatHappened    String
+  metadata        Json?
+  createdAt       DateTime @default(now())
+
+  @@index([paymentId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@map("audit_events")
+}
