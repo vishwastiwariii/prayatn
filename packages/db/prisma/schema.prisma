@@ -210,8 +210,14 @@ model Classification {
   classifierVersion String
   source            ClassificationSource @default(RULE)
   evidence          String[]
+  /** Human-readable diagnosis from the classifier. Never prescriptive. */
+  explanation       String?
   createdAt         DateTime             @default(now())
 
+  /// One classification per failure per classifier version. Bumping
+  /// `classifierVersion` lets a failure be re-diagnosed exactly once by the
+  /// new logic; the same version can never create a duplicate row.
+  @@unique([failureId, classifierVersion])
   @@index([failureId])
   @@index([cause])
   @@map("classifications")

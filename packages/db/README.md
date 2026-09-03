@@ -43,7 +43,7 @@ are re-exported from the package root.
 | `pnpm --filter @recovery-desk/db migrate`        | create + apply a dev migration                      |
 | `pnpm --filter @recovery-desk/db migrate:deploy` | apply committed migrations (prod/CI)                |
 | `pnpm --filter @recovery-desk/db studio`         | open Prisma Studio                                  |
-| `pnpm --filter @recovery-desk/db seed`           | connectivity check (real dataset = Phase 5)         |
+| `pnpm --filter @recovery-desk/db seed`           | minimal dev seed, idempotent (experiment set = Phase 5) |
 | `pnpm --filter @recovery-desk/db test`           | repository integration tests (needs DB)             |
 
 `DATABASE_URL` is read from the repo-root `.env` via `dotenv-cli`.

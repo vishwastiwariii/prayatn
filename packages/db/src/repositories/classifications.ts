@@ -12,6 +12,13 @@ export function createClassificationRepository(db: Database = prismaClient) {
       return db.classification.findUnique({ where: { id } });
     },
 
+    /** Idempotency lookup for the classification service (one per version). */
+    findByFailureAndVersion(failureId: string, classifierVersion: string) {
+      return db.classification.findUnique({
+        where: { failureId_classifierVersion: { failureId, classifierVersion } },
+      });
+    },
+
     listByFailure(failureId: string) {
       return db.classification.findMany({
         where: { failureId },
