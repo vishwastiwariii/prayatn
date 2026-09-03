@@ -17,6 +17,8 @@
     "@recovery-desk/classifier": "workspace:*",
     "@recovery-desk/db": "workspace:*",
     "@recovery-desk/domain": "workspace:*",
+    "@recovery-desk/experiment": "workspace:*",
+    "@recovery-desk/recovery": "workspace:*",
     "@recovery-desk/shared": "workspace:*",
     "dotenv": "^16.4.7",
     "fastify": "^5.2.0",

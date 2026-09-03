@@ -4,9 +4,12 @@ import { type Env, loadEnv } from './env';
 import type { ClassifyFailureDeps } from './classification/service';
 import prismaPlugin from './plugins/prisma';
 import redisPlugin from './plugins/redis';
+import type { EvaluationDeps } from './evaluations/service';
 import { createClassificationRoutes } from './routes/classification';
+import { createEvaluationRoutes } from './routes/evaluations';
 import { failureRoutes } from './routes/failures';
 import { healthRoutes } from './routes/health';
+import { type RecoveryRouteDeps, createRecoveryRoutes } from './routes/recovery';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -17,6 +20,10 @@ declare module 'fastify' {
 export interface BuildAppOptions {
   /** Override the classification pipeline's data access (used by tests). */
   classificationDeps?: ClassifyFailureDeps;
+  /** Override the recovery decide/enqueue data access (used by tests). */
+  recoveryDeps?: RecoveryRouteDeps;
+  /** Override the evaluation runner + store (used by tests). */
+  evaluationDeps?: EvaluationDeps;
 }
 
 export async function buildApp(
@@ -50,6 +57,8 @@ export async function buildApp(
   await app.register(healthRoutes);
   await app.register(failureRoutes);
   await app.register(createClassificationRoutes(options.classificationDeps));
+  await app.register(createRecoveryRoutes(options.recoveryDeps));
+  await app.register(createEvaluationRoutes(options.evaluationDeps));
 
   return app;
 }
