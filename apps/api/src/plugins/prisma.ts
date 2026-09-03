@@ -1,6 +1,6 @@
-import { PrismaClient } from '@prisma/client';
 import type { FastifyPluginAsync } from 'fastify';
 import fp from 'fastify-plugin';
+import { prismaClient, type PrismaClient } from '@recovery-desk/db';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -8,14 +8,12 @@ declare module 'fastify' {
   }
 }
 
-// The client is created eagerly but only connects on first query, which keeps
-// `buildApp` usable in tests without a live database.
+// Uses the shared singleton from @recovery-desk/db. Prisma connects lazily on
+// first query, so registering this plugin never needs a live database.
 const prismaPlugin: FastifyPluginAsync = async (app) => {
-  const prisma = new PrismaClient();
-
-  app.decorate('prisma', prisma);
+  app.decorate('prisma', prismaClient);
   app.addHook('onClose', async () => {
-    await prisma.$disconnect();
+    await prismaClient.$disconnect();
   });
 };
 

@@ -14,7 +14,9 @@
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
-    "@prisma/client": "^6.1.0",
+    "@recovery-desk/classifier": "workspace:*",
+    "@recovery-desk/db": "workspace:*",
+    "@recovery-desk/domain": "workspace:*",
     "@recovery-desk/shared": "workspace:*",
     "dotenv": "^16.4.7",
     "fastify": "^5.2.0",
