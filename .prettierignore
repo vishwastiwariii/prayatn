@@ -4,3 +4,5 @@ dist
 .turbo
 coverage
 pnpm-lock.yaml
+**/generated
+packages/db/prisma/migrations

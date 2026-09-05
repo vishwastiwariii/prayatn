@@ -1,0 +1,133 @@
+# Recovery Desk — CI (Phase 14 §14).
+#
+#   install -> lint -> typecheck -> unit tests -> integration tests -> build
+#
+# Integration tests get real Postgres and Redis services, so the parts that
+# only fail against real infrastructure (transactions, unique constraints,
+# BullMQ delivery, the Redis-backed circuit breaker) are actually exercised.
+# Nothing is deployed unless every one of these passes.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  static:
+    name: Lint & typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run lint
+      - run: pnpm run typecheck
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: recovery
+          POSTGRES_PASSWORD: recovery
+          POSTGRES_DB: recovery_desk
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 10s
+          --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 10s
+          --health-timeout 5s --health-retries 5
+    env:
+      DATABASE_URL: postgresql://recovery:recovery@localhost:5432/recovery_desk
+      REDIS_URL: redis://localhost:6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Apply migrations
+        run: pnpm --filter @recovery-desk/db exec prisma migrate deploy
+      - name: Unit + integration tests
+        run: pnpm run test
+
+  build:
+    name: Build
+    needs: [static, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+
+  images:
+    name: Production images
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # Build only — publishing and deployment are a separate, credentialed
+      # workflow. A broken Dockerfile fails here, not in a deploy window.
+      - name: Build API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Deployment gate, for reference. Runs only on main, only after everything
+  # above is green, and finishes by proving the deployed system actually works:
+  #   deploy -> migrate -> health check -> production smoke test
+  deploy:
+    name: Deploy
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [images]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy
+        run: echo "Wire to your host here (fly deploy / ECS update / compose pull && up -d)."
+      - name: Run migrations
+        run: echo "pnpm --filter @recovery-desk/db run migrate:deploy"
+      - name: Health check
+        run: echo "curl -fsS \"$API_URL/health/ready\""
+      - name: Production smoke test
+        run: echo "pnpm production:smoke-test"

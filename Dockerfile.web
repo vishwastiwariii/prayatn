@@ -1,0 +1,46 @@
+# Recovery Desk — dashboard production image (Phase 14 §10).
+#
+# Next.js standalone output: the runtime stage ships the server bundle and
+# static assets only — no pnpm, no source, no dev dependencies.
+
+FROM node:22-alpine AS base
+ENV PNPM_HOME=/pnpm PATH=$PNPM_HOME:$PATH
+RUN corepack enable
+WORKDIR /app
+
+FROM base AS deps
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc ./
+COPY apps/api/package.json apps/api/
+COPY apps/web/package.json apps/web/
+COPY workers/recovery/package.json workers/recovery/
+COPY packages/ai/package.json packages/ai/
+COPY packages/circuit-breaker/package.json packages/circuit-breaker/
+COPY packages/classifier/package.json packages/classifier/
+COPY packages/db/package.json packages/db/
+COPY packages/demo/package.json packages/demo/
+COPY packages/domain/package.json packages/domain/
+COPY packages/experiment/package.json packages/experiment/
+COPY packages/policy-engine/package.json packages/policy-engine/
+COPY packages/recovery/package.json packages/recovery/
+COPY packages/shared/package.json packages/shared/
+COPY packages/simulator/package.json packages/simulator/
+RUN pnpm install --frozen-lockfile --ignore-scripts
+
+FROM deps AS build
+COPY . .
+# Baked at build time — this is a public URL, never a secret. Anything secret
+# must not be reachable from the browser bundle (Phase 14 §13).
+ARG NEXT_PUBLIC_API_URL=http://localhost:4000
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+RUN pnpm --filter @recovery-desk/db run generate \
+ && pnpm --filter @recovery-desk/web run build
+
+FROM base AS runtime
+ENV NODE_ENV=production
+RUN addgroup -S recovery && adduser -S -G recovery recovery
+COPY --from=build --chown=recovery:recovery /app /app
+USER recovery
+EXPOSE 3000
+HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["pnpm", "--filter", "@recovery-desk/web", "run", "start"]

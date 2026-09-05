@@ -9,6 +9,8 @@ export default tseslint.config(
       '**/.turbo/**',
       '**/node_modules/**',
       '**/next-env.d.ts',
+      '**/generated/**',
+      'packages/db/src/generated/**',
     ],
   },
   js.configs.recommended,

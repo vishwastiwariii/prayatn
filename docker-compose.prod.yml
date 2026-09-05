@@ -1,0 +1,104 @@
+# Recovery Desk — production topology (Phase 14 §10).
+#
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Every secret comes from the environment; none is baked into an image or
+# committed here. Copy `.env.production.example`, fill it in, and pass it with
+# `--env-file`. The API refuses to start if a production secret is missing
+# (see apps/api/src/env.ts), so a misconfigured deploy fails fast and loudly
+# rather than serving traffic unauthenticated.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${POSTGRES_DB:-recovery_desk}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Not published: only the app network reaches the database.
+    expose: ['5432']
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Phase 14 §5 — Redis is authenticated and does not accept unauthenticated
+    # commands. The circuit breaker's shared state lives here.
+    command: ['redis-server', '--requirepass', '${REDIS_PASSWORD:?required}', '--appendonly', 'yes']
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose: ['6379']
+
+  migrate:
+    build: { context: ., dockerfile: Dockerfile.api }
+    command: ['pnpm', '--filter', '@recovery-desk/db', 'run', 'migrate:deploy']
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?required}
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: 'no'
+
+  api:
+    build: { context: ., dockerfile: Dockerfile.api }
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?required}
+      REDIS_URL: ${REDIS_URL:?required}
+      CORS_ORIGIN: ${CORS_ORIGIN:?required}
+      AUTH_ENABLED: 'true'
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?required}
+      OPERATOR_API_KEY: ${OPERATOR_API_KEY:?required}
+      DEMO_API_KEY: ${DEMO_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    ports: ['4000:4000']
+
+  worker:
+    build: { context: ., dockerfile: Dockerfile.api }
+    command: ['pnpm', '--filter', '@recovery-desk/recovery-worker', 'run', 'start']
+    restart: unless-stopped
+    # Give the worker time to finish an in-flight payment before SIGKILL —
+    # must exceed the worker's own SHUTDOWN_TIMEOUT_MS.
+    stop_grace_period: 45s
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?required}
+      REDIS_URL: ${REDIS_URL:?required}
+      RECOVERY_WORKER_CONCURRENCY: ${RECOVERY_WORKER_CONCURRENCY:-4}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?required}
+    restart: unless-stopped
+    depends_on: [api]
+    ports: ['3000:3000']
+
+volumes:
+  pgdata:
+  redisdata:

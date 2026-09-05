@@ -1,18 +1,25 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "tasks": {
+    "generate": {
+      "inputs": ["prisma/schema.prisma"],
+      "outputs": ["src/generated/**"]
+    },
     "build": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["@recovery-desk/db#generate", "^build"],
       "outputs": []
     },
-    "lint": {},
+    "lint": {
+      "dependsOn": ["@recovery-desk/db#generate"]
+    },
     "typecheck": {
-      "dependsOn": ["^typecheck"]
+      "dependsOn": ["@recovery-desk/db#generate", "^typecheck"]
     },
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["@recovery-desk/db#generate", "^build"]
     },
     "dev": {
+      "dependsOn": ["@recovery-desk/db#generate"],
       "cache": false,
       "persistent": true
     }

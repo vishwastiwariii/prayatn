@@ -17,18 +17,23 @@
     "format:check": "prettier --check .",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
-    "db:generate": "prisma generate",
-    "postinstall": "prisma generate"
-  },
-  "dependencies": {
-    "@prisma/client": "^6.1.0"
+    "db:generate": "turbo run generate",
+    "db:migrate": "pnpm --filter @recovery-desk/db run migrate",
+    "db:migrate:deploy": "pnpm --filter @recovery-desk/db run migrate:deploy",
+    "db:studio": "pnpm --filter @recovery-desk/db run studio",
+    "db:seed": "pnpm --filter @recovery-desk/db run seed",
+    "exp": "pnpm --filter @recovery-desk/experiment run run:experiment",
+    "eval": "pnpm --filter @recovery-desk/experiment run run:evaluation",
+    "storm": "pnpm --filter @recovery-desk/experiment run run:storm",
+    "postinstall": "pnpm --filter @recovery-desk/db run generate",
+    "demo:smoke-test": "pnpm --filter @recovery-desk/api exec tsx ../../scripts/demo-smoke-test.ts",
+    "production:smoke-test": "pnpm --filter @recovery-desk/api exec tsx ../../scripts/production-smoke-test.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@types/node": "^22.10.2",
     "eslint": "^9.17.0",
     "prettier": "^3.4.2",
-    "prisma": "^6.1.0",
     "turbo": "^2.3.3",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.1"

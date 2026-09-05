@@ -1,0 +1,62 @@
+# Recovery Desk — API + worker production image (Phase 14 §10).
+#
+# Multi-stage: the build stage carries pnpm, dev dependencies and the Prisma
+# CLI; the runtime stage carries none of that. One image serves both the API
+# and the worker — same code, different entrypoint — so they can never drift
+# apart in a deployment.
+
+# ---------------------------------------------------------------------------
+FROM node:22-alpine AS base
+ENV PNPM_HOME=/pnpm PATH=$PNPM_HOME:$PATH
+RUN corepack enable
+WORKDIR /app
+
+# ---------------------------------------------------------------------------
+FROM base AS deps
+# Copy only manifests first so a source-only change reuses the dependency layer.
+COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc ./
+COPY apps/api/package.json apps/api/
+COPY apps/web/package.json apps/web/
+COPY workers/recovery/package.json workers/recovery/
+COPY packages/ai/package.json packages/ai/
+COPY packages/circuit-breaker/package.json packages/circuit-breaker/
+COPY packages/classifier/package.json packages/classifier/
+COPY packages/db/package.json packages/db/
+COPY packages/demo/package.json packages/demo/
+COPY packages/domain/package.json packages/domain/
+COPY packages/experiment/package.json packages/experiment/
+COPY packages/policy-engine/package.json packages/policy-engine/
+COPY packages/recovery/package.json packages/recovery/
+COPY packages/shared/package.json packages/shared/
+COPY packages/simulator/package.json packages/simulator/
+RUN pnpm install --frozen-lockfile --ignore-scripts
+
+# ---------------------------------------------------------------------------
+FROM deps AS build
+COPY . .
+# Generate the Prisma client, then verify the whole workspace compiles. A type
+# error must fail the image build, not production.
+RUN pnpm --filter @recovery-desk/db run generate \
+ && pnpm run typecheck
+
+# ---------------------------------------------------------------------------
+FROM base AS runtime
+ENV NODE_ENV=production
+
+# Non-root. The app never writes to disk, so it owns nothing it does not need.
+RUN addgroup -S recovery && adduser -S -G recovery recovery
+
+COPY --from=build --chown=recovery:recovery /app /app
+
+# tsx runs the TypeScript sources directly. The alternative (emitting JS) buys
+# little here because every workspace package is consumed as source.
+USER recovery
+EXPOSE 4000
+
+# Liveness only — readiness (which touches Postgres/Redis) is the
+# orchestrator's job via GET /health/ready, so a database blip does not get
+# the container killed and restarted into the same blip.
+HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:4000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["pnpm", "--filter", "@recovery-desk/api", "run", "start"]

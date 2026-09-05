@@ -24,8 +24,9 @@ pnpm-debug.log*
 # coverage
 coverage/
 
-# prisma local databases
+# prisma
 prisma/*.db
+packages/db/src/generated/
 
 # os / editor
 .DS_Store
