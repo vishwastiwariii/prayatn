@@ -9,8 +9,17 @@ import {
   withTransaction,
 } from '@recovery-desk/db';
 import type { PolicyDecision } from '@recovery-desk/policy-engine';
-import { createSimulator } from '@recovery-desk/simulator';
+import { type Gateway, createSimulator } from '@recovery-desk/simulator';
+import {
+  CIRCUIT_AUDIT_EVENTS,
+  type CircuitBreaker,
+  type CircuitTransitionInfo,
+  createCircuitBreaker,
+  createRedisCircuitStore,
+} from '@recovery-desk/circuit-breaker';
+import { Redis } from 'ioredis';
 import { createRecoveryQueue, enqueueRecoveryJob } from './queue';
+import type { RescheduleArgs } from './types';
 import { SCHEDULABLE_ACTIONS } from './types';
 import type {
   DecideRecoveryDeps,
@@ -44,6 +53,7 @@ function toStoredAction(row: {
   delayMinutes: number | null;
   maxAttempts: number | null;
   idempotencyKey: string;
+  requiresCustomerMessage?: boolean;
   createdAt: Date;
   executedAt: Date | null;
 }): StoredAction {
@@ -59,6 +69,7 @@ function toStoredAction(row: {
     delayMinutes: row.delayMinutes,
     maxAttempts: row.maxAttempts,
     idempotencyKey: row.idempotencyKey,
+    requiresCustomerMessage: row.requiresCustomerMessage ?? false,
     createdAt: row.createdAt,
     executedAt: row.executedAt,
   };
@@ -101,7 +112,10 @@ export const liveDecideDeps: DecideRecoveryDeps = {
     if (!failure) return null;
     const payment = failure.payment;
 
-    const classification = await repos.classifications.latestForFailure(failureId);
+    // Phase 12: only RULE/HUMAN classifications are decision-eligible — an
+    // AI suggestion (LLM_SUGGESTION) must never become authoritative just by
+    // being the newest row for this failure.
+    const classification = await repos.classifications.latestDecisionEligibleForFailure(failureId);
 
     const [executedActions, mandateHits] = await Promise.all([
       prismaClient.recoveryAction.findMany({
@@ -175,6 +189,7 @@ export const liveDecideDeps: DecideRecoveryDeps = {
         reason: decision.reason,
         delayMinutes: decision.delayMinutes,
         maxAttempts: decision.maxAttempts,
+        requiresCustomerMessage: decision.requiresCustomerMessage,
         idempotencyKey,
       });
 
@@ -293,11 +308,193 @@ export const liveEnqueueDeps: EnqueueRecoveryDeps = {
   },
 };
 
+// --- circuit breaker (Phase 10) ---------------------------------
+
+let sharedCircuitRedis: Redis | null = null;
+let sharedCircuitBreaker: CircuitBreaker | null = null;
+
+/** Write an audit event for a circuit transition (gateway-wide, no paymentId). */
+function auditCircuit(
+  eventType: string,
+  info: CircuitTransitionInfo & { reopened?: boolean },
+  parts: { saw: string; concluded: string; allowed: string; did: string; happened: string },
+): void {
+  void repos.auditEvents.append({
+    paymentId: null,
+    eventType,
+    whatWeSaw: parts.saw,
+    whatWeConcluded: parts.concluded,
+    whatWasAllowed: parts.allowed,
+    whatWeDid: parts.did,
+    whatHappened: parts.happened,
+    metadata: {
+      reason: info.reason,
+      failureCount: info.failureCount,
+      openedAt: info.openedAt ? new Date(info.openedAt).toISOString() : null,
+      reopened: info.reopened ?? false,
+    } as Prisma.InputJsonObject,
+  });
+}
+
+export function getLiveCircuitBreaker(redisUrl = process.env.REDIS_URL ?? ''): CircuitBreaker {
+  if (sharedCircuitBreaker) return sharedCircuitBreaker;
+  sharedCircuitRedis = new Redis(redisUrl, { maxRetriesPerRequest: null, lazyConnect: false });
+  const store = createRedisCircuitStore({ redis: sharedCircuitRedis, failureWindowSeconds: 60 });
+  sharedCircuitBreaker = createCircuitBreaker({
+    store,
+    hooks: {
+      onOpen: (i) =>
+        auditCircuit(CIRCUIT_AUDIT_EVENTS.OPENED, i, {
+          saw: `Gateway failure storm: ${i.reason}`,
+          concluded: 'The payment gateway is currently unsafe to call.',
+          allowed: 'Block all gateway calls until the cooldown elapses.',
+          did: i.reopened
+            ? 'Re-opened the circuit and restarted the cooldown.'
+            : 'Opened the circuit.',
+          happened: 'Future gateway retries are now suppressed and rescheduled.',
+        }),
+      onHalfOpen: (i) =>
+        auditCircuit(CIRCUIT_AUDIT_EVENTS.HALF_OPEN, i, {
+          saw: 'Cooldown elapsed on an OPEN gateway circuit.',
+          concluded: 'One probe request may test whether the gateway has recovered.',
+          allowed: 'Exactly one probe gateway call.',
+          did: 'Moved the circuit to HALF_OPEN.',
+          happened: 'The next eligible recovery job will run as a probe.',
+        }),
+      onProbeSucceeded: (i) =>
+        auditCircuit(CIRCUIT_AUDIT_EVENTS.PROBE_SUCCEEDED, i, {
+          saw: 'The HALF_OPEN probe gateway call succeeded.',
+          concluded: 'The gateway has recovered.',
+          allowed: 'Restore normal gateway traffic.',
+          did: 'Recorded a successful probe.',
+          happened: 'The circuit is closing.',
+        }),
+      onProbeFailed: (i) =>
+        auditCircuit(CIRCUIT_AUDIT_EVENTS.PROBE_FAILED, i, {
+          saw: 'The HALF_OPEN probe gateway call failed with a transient gateway error.',
+          concluded: 'The gateway is still unhealthy.',
+          allowed: 'Keep the circuit OPEN.',
+          did: 'Recorded a failed probe.',
+          happened: 'The cooldown restarts; retries stay suppressed.',
+        }),
+      onClose: (i) =>
+        auditCircuit(CIRCUIT_AUDIT_EVENTS.CLOSED, i, {
+          saw: 'Gateway probe succeeded after an outage.',
+          concluded: 'Normal gateway traffic can resume.',
+          allowed: 'Release queued recovery jobs in controlled batches.',
+          did: 'Closed the circuit and reset the failure counters.',
+          happened: 'Recovery resumes with a gradual queue drain.',
+        }),
+    },
+  });
+  return sharedCircuitBreaker;
+}
+
+export async function closeLiveCircuitBreaker(): Promise<void> {
+  if (sharedCircuitRedis) {
+    sharedCircuitRedis.disconnect();
+    sharedCircuitRedis = null;
+  }
+  sharedCircuitBreaker = null;
+}
+
+/** Persist RECOVERY_BLOCKED_BY_CIRCUIT and push the action's schedule out. */
+export async function liveReschedule(args: RescheduleArgs): Promise<void> {
+  const saw =
+    args.trigger === 'GATEWAY_5XX'
+      ? `Gateway returned a transient failure (${args.detail}).`
+      : args.trigger === 'PROBE_IN_PROGRESS'
+        ? 'Gateway circuit is HALF_OPEN and a probe is already in progress.'
+        : 'Gateway circuit is OPEN.';
+  await withTransaction(async (tx) => {
+    const r = createRepositories(tx);
+    await r.recoveryActions.update(args.actionId, {
+      status: 'SCHEDULED',
+      scheduledFor: new Date(Date.now() + args.delaySeconds * 1000),
+    });
+    await r.auditEvents.append({
+      paymentId: args.paymentId,
+      eventType: CIRCUIT_AUDIT_EVENTS.BLOCKED_RECOVERY,
+      whatWeSaw: saw,
+      whatWeConcluded: 'Gateway calls are temporarily unsafe.',
+      whatWasAllowed: 'No payment retry was allowed.',
+      whatWeDid: `Recovery action was rescheduled for ~${args.delaySeconds}s later.`,
+      whatHappened: 'No gateway request was made; no payment attempt was consumed.',
+      metadata: {
+        actionId: args.actionId,
+        attemptNumber: args.attemptNumber,
+        trigger: args.trigger,
+        circuitState: args.circuitState,
+        delaySeconds: args.delaySeconds,
+        detail: args.detail,
+      } as Prisma.InputJsonObject,
+    });
+  });
+}
+
 // --- execute (worker core) ---------------------------------------
+
+/**
+ * The gateway simulator this process charges against. Swappable so the Phase 13
+ * demo can put the SAME executor in front of an unhealthy gateway (a seeded
+ * 5xx storm window) and then restore it — without touching the executor, the
+ * circuit breaker, the policy engine or any threshold. Nothing else mutates it.
+ */
+let currentGateway: Gateway = createSimulator();
+
+/** Point this process's executor at a different (e.g. storm-configured) simulator. */
+export function setLiveGateway(gateway: Gateway): void {
+  currentGateway = gateway;
+}
+
+/** Restore the default healthy simulator. */
+export function resetLiveGateway(): void {
+  currentGateway = createSimulator();
+}
+
+export function getLiveGateway(): Gateway {
+  return currentGateway;
+}
+
+/**
+ * How long an action may sit in EXECUTING before another worker may reclaim it.
+ * Long enough that a slow-but-alive execution is never stolen; short enough
+ * that a crashed worker does not strand a payment forever.
+ */
+const STALE_EXECUTION_MS = Number(process.env.JOB_TIMEOUT_MS ?? 30_000) * 2;
 
 export const liveExecuteDeps: ExecuteRecoveryDeps = {
   now: () => new Date(),
-  gateway: createSimulator(),
+  get gateway() {
+    return currentGateway;
+  },
+
+  /**
+   * Phase 14 §2 — one atomic statement; Postgres decides the winner.
+   *
+   * `updateMany` compiles to `UPDATE ... WHERE id = ? AND (status IN (...) OR
+   * stale)`, so two concurrent executors cannot both see count === 1. The
+   * stale clause is the crash-recovery path: an action left EXECUTING by a
+   * worker that died becomes claimable again after the timeout.
+   */
+  async claimForExecution(actionId) {
+    const staleBefore = new Date(Date.now() - STALE_EXECUTION_MS);
+    const claimed = await prismaClient.recoveryAction.updateMany({
+      where: {
+        id: actionId,
+        OR: [
+          { status: { in: ['PENDING', 'SCHEDULED'] } },
+          { status: 'EXECUTING', updatedAt: { lt: staleBefore } },
+        ],
+      },
+      data: { status: 'EXECUTING' },
+    });
+    return claimed.count === 1;
+  },
+  get circuitBreaker() {
+    return getLiveCircuitBreaker();
+  },
+  reschedule: liveReschedule,
 
   async loadExecutionContext(actionId) {
     const row = await prismaClient.recoveryAction.findUnique({

@@ -3,6 +3,12 @@
  * test suites (`@recovery-desk/recovery/testing`). Not used in production code.
  */
 export { makeWorld, seedFailure, decideDepsFor, enqueueDepsFor, executeDepsFor } from './_fakes';
+export { runGatewayStormScenario } from './storm-scenario';
+export type {
+  StormScenarioOptions,
+  StormScenarioResult,
+  StormTraceRow,
+} from './storm-scenario';
 export type {
   World,
   PaymentRow,

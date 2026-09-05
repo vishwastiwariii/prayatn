@@ -13,6 +13,8 @@ export interface StoredAction {
   delayMinutes: number | null;
   maxAttempts: number | null;
   idempotencyKey: string;
+  /** Phase 12: did the policy engine's decision call for a customer message? */
+  requiresCustomerMessage?: boolean;
   createdAt: Date;
   executedAt: Date | null;
 }
@@ -174,13 +176,47 @@ export interface PersistOutcomeArgs {
   };
 }
 
+/** Why a recovery attempt was held back rather than charged (Phase 10). */
+export type RescheduleTrigger = 'CIRCUIT_OPEN' | 'PROBE_IN_PROGRESS' | 'GATEWAY_5XX';
+
+export interface RescheduleArgs {
+  actionId: string;
+  paymentId: string;
+  attemptNumber: number;
+  delaySeconds: number;
+  trigger: RescheduleTrigger;
+  circuitState: string;
+  /** Human-readable detail (e.g. the 5xx code, or the block reason). */
+  detail: string;
+}
+
 export interface ExecuteRecoveryDeps {
   loadExecutionContext(actionId: string): Promise<ExecutionContext | null>;
+  /**
+   * Phase 14 §2 — atomically take ownership of this action before any side
+   * effect. Returns false when another executor already owns it, which is how
+   * two simultaneous deliveries of the same job (a stalled-lock handover)
+   * are prevented from both reaching the gateway. Optional: without it the
+   * executor still de-duplicates sequential redeliveries via `outcomeExists`.
+   */
+  claimForExecution?(actionId: string): Promise<boolean>;
   gateway: import('@recovery-desk/simulator').Gateway;
   persistOutcome(
     args: PersistOutcomeArgs,
   ): Promise<{ outcomeId: string; paymentStatus: string; recoveryStatus: string | null }>;
   now(): Date;
+  /**
+   * Phase 10: the shared gateway circuit breaker. When present, the executor
+   * checks it before every charge and reports success / gateway failure to it.
+   * When absent, behaviour is exactly Phase 9 (no circuit).
+   */
+  circuitBreaker?: import('@recovery-desk/circuit-breaker').CircuitBreaker;
+  /**
+   * Persist a `RECOVERY_BLOCKED_BY_CIRCUIT` audit event and push the action's
+   * `scheduledFor` out. The BullMQ-level delay is handled by the worker
+   * processor (`job.moveToDelayed`), never by sleeping.
+   */
+  reschedule?(args: RescheduleArgs): Promise<void>;
 }
 
 export type ExecuteRecoveryResult =
@@ -192,5 +228,11 @@ export type ExecuteRecoveryResult =
       gatewayLatencyMs: number;
     }
   | { status: 'BLOCKED'; note: string; outcomeId: string }
+  | {
+      status: 'CIRCUIT_BLOCKED';
+      trigger: RescheduleTrigger;
+      retryAfterSeconds: number;
+      circuitState: string;
+    }
   | { status: 'DUPLICATE'; actionId: string }
   | { status: 'ACTION_NOT_FOUND'; actionId: string };

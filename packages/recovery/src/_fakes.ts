@@ -294,10 +294,48 @@ export function executeDepsFor(
   world: World,
   gateway: Gateway,
   now: () => Date = () => FIXED_NOW,
+  extra: Partial<Pick<ExecuteRecoveryDeps, 'circuitBreaker' | 'reschedule'>> = {},
 ): ExecuteRecoveryDeps {
   return {
     now,
     gateway,
+    ...(extra.circuitBreaker ? { circuitBreaker: extra.circuitBreaker } : {}),
+    reschedule:
+      extra.reschedule ??
+      (async (args) => {
+        const a = world.actions.get(args.actionId);
+        if (a) {
+          a.status = 'SCHEDULED';
+          a.scheduledFor = new Date(now().getTime() + args.delaySeconds * 1000);
+        }
+        world.audits.push({
+          paymentId: args.paymentId,
+          eventType: 'RECOVERY_BLOCKED_BY_CIRCUIT',
+          whatWeSaw:
+            args.trigger === 'GATEWAY_5XX'
+              ? `Gateway returned a transient failure (${args.detail}).`
+              : 'Gateway circuit is OPEN.',
+          whatWeConcluded: 'Gateway calls are temporarily unsafe.',
+          whatWasAllowed: 'No payment retry was allowed.',
+          whatWeDid: `Recovery action was rescheduled for ~${args.delaySeconds}s later.`,
+          whatHappened: 'No gateway request was made.',
+          metadata: {
+            actionId: args.actionId,
+            trigger: args.trigger,
+            circuitState: args.circuitState,
+            delaySeconds: args.delaySeconds,
+          },
+        });
+      }),
+    /** Mirrors the Postgres compare-and-set: exactly one caller can win. */
+    async claimForExecution(actionId) {
+      const a = world.actions.get(actionId);
+      if (!a) return false;
+      if (!['PENDING', 'SCHEDULED'].includes(a.status)) return false;
+      a.status = 'EXECUTING';
+      return true;
+    },
+
     async loadExecutionContext(actionId) {
       const a = world.actions.get(actionId);
       if (!a) return null;

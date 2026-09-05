@@ -8,6 +8,9 @@ import type {
   PersistOutcomeArgs,
 } from './types';
 
+/** Backoff when the gateway returned a 5xx but the circuit has not (yet) opened. */
+const GATEWAY_5XX_BACKOFF_SECONDS = 15;
+
 /**
  * Recovery worker core — Phase 9.
  *
@@ -55,6 +58,23 @@ export async function executeRecoveryAction(
   if (block) {
     const outcomeId = await persistBlocked(deps, ctx, block);
     return { status: 'BLOCKED', note: block.note, outcomeId };
+  }
+
+  // --- atomic claim (Phase 14 §2) --------------------------------------
+  // The `outcomeExists` check above de-duplicates SEQUENTIAL redeliveries. It
+  // cannot stop two deliveries running at the same instant — the stalled-lock
+  // handover, where BullMQ hands a job to worker B while worker A is still
+  // inside it. Both would read "no outcome yet" and both would charge.
+  //
+  // So before anything that costs money, take ownership with a single atomic
+  // compare-and-set. Exactly one executor can win; the loser returns DUPLICATE
+  // having made zero gateway calls.
+  if (deps.claimForExecution) {
+    const claimed = await guardInfra(
+      () => deps.claimForExecution?.(actionId) ?? Promise.resolve(true),
+      'claim action for execution',
+    );
+    if (!claimed) return { status: 'DUPLICATE', actionId };
   }
 
   // --- execute against the mock gateway ------------------------------
@@ -209,6 +229,39 @@ async function runCharge(
   now: Date,
 ): Promise<ExecuteRecoveryResult> {
   const attemptNumber = ctx.payment.attemptCount + 1;
+  const cb = deps.circuitBreaker;
+
+  // --- Circuit Breaker: is it safe to call the gateway at all? -----------
+  if (cb) {
+    if (!deps.reschedule) {
+      throw new InfrastructureError('circuitBreaker set but reschedule() dep is missing');
+    }
+    const permission = await guardInfra(() => cb.beforeRequest(), 'check circuit breaker');
+    if (!permission.allowed) {
+      const trigger = permission.reason === 'CIRCUIT_OPEN' ? 'CIRCUIT_OPEN' : 'PROBE_IN_PROGRESS';
+      const circuitState = permission.reason === 'CIRCUIT_OPEN' ? 'OPEN' : 'HALF_OPEN';
+      await guardInfra(
+        () =>
+          deps.reschedule!({
+            actionId: ctx.action.id,
+            paymentId: ctx.payment.id,
+            attemptNumber,
+            delaySeconds: permission.retryAfterSeconds,
+            trigger,
+            circuitState,
+            detail: permission.reason,
+          }),
+        'reschedule circuit-blocked action',
+      );
+      return {
+        status: 'CIRCUIT_BLOCKED',
+        trigger,
+        retryAfterSeconds: permission.retryAfterSeconds,
+        circuitState,
+      };
+    }
+  }
+
   const result = guardSync(
     () =>
       deps.gateway.charge({
@@ -216,9 +269,51 @@ async function runCharge(
         amountMinor: ctx.payment.amountMinor,
         method: ctx.payment.method,
         attemptNumber,
+        atMs: now.getTime(),
+        // Stable across every redelivery of this action. A real PSP would use
+        // it to collapse the one window our claim cannot close: a crash
+        // between the charge returning and the outcome being written.
+        idempotencyKey: ctx.action.id,
       }),
     'gateway.charge',
   );
+
+  // --- Circuit Breaker: report the gateway's health ------------------
+  if (result.kind === 'GATEWAY_FAILURE') {
+    // A 5xx is NOT a customer payment failure: do not consume an attempt, do not
+    // write a RecoveryOutcome (the action must stay re-executable). Tell the
+    // breaker, then hold the action for later.
+    if (cb) await guardInfra(() => cb.onGatewayFailure(), 'report gateway failure');
+    const snapshot = cb ? await guardInfra(() => cb.getSnapshot(), 'read circuit snapshot') : null;
+    const delaySeconds =
+      snapshot?.state === 'OPEN'
+        ? Math.max(1, snapshot.remainingCooldownSeconds)
+        : GATEWAY_5XX_BACKOFF_SECONDS;
+    if (deps.reschedule) {
+      await guardInfra(
+        () =>
+          deps.reschedule!({
+            actionId: ctx.action.id,
+            paymentId: ctx.payment.id,
+            attemptNumber,
+            delaySeconds,
+            trigger: 'GATEWAY_5XX',
+            circuitState: snapshot?.state ?? 'CLOSED',
+            detail: `${result.code}: ${result.reason}`,
+          }),
+        'reschedule after gateway 5xx',
+      );
+    }
+    return {
+      status: 'CIRCUIT_BLOCKED',
+      trigger: 'GATEWAY_5XX',
+      retryAfterSeconds: delaySeconds,
+      circuitState: snapshot?.state ?? 'CLOSED',
+    };
+  }
+
+  // SUCCESS or PAYMENT_FAILURE — the gateway itself responded fine.
+  if (cb) await guardInfra(() => cb.onSuccess(), 'report gateway success');
 
   const success = result.status === 'SUCCESS';
   const newAttemptCount = ctx.payment.attemptCount + 1;

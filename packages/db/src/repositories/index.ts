@@ -5,6 +5,7 @@ import { createPaymentRepository } from './payments';
 import { createPaymentFailureRepository } from './payment-failures';
 import { createClassificationRepository } from './classifications';
 import { createRecoveryActionRepository } from './recovery-actions';
+import { createRecoveryMessageRepository } from './recovery-messages';
 import { createRecoveryOutcomeRepository } from './recovery-outcomes';
 import { createAuditEventRepository } from './audit-events';
 
@@ -13,6 +14,7 @@ export * from './payments';
 export * from './payment-failures';
 export * from './classifications';
 export * from './recovery-actions';
+export * from './recovery-messages';
 export * from './recovery-outcomes';
 export * from './audit-events';
 
@@ -24,6 +26,7 @@ export function createRepositories(db: Database = prismaClient) {
     paymentFailures: createPaymentFailureRepository(db),
     classifications: createClassificationRepository(db),
     recoveryActions: createRecoveryActionRepository(db),
+    recoveryMessages: createRecoveryMessageRepository(db),
     recoveryOutcomes: createRecoveryOutcomeRepository(db),
     auditEvents: createAuditEventRepository(db),
   };

@@ -131,6 +131,12 @@ enum CustomerBalanceState {
   UNKNOWN
 }
 
+/// Phase 12 — where a generated recovery message came from.
+enum RecoveryMessageSource {
+  AI
+  FALLBACK
+}
+
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
@@ -169,6 +175,7 @@ model Payment {
   failures        PaymentFailure[]
   recoveryActions RecoveryAction[]
   auditEvents     AuditEvent[]
+  messages        RecoveryMessage[]
 
   @@index([customerId])
   @@index([status])
@@ -238,15 +245,42 @@ model RecoveryAction {
   maxAttempts    Int?
   /// Guarantees an action is executed at most once (Phase 9 idempotency layer).
   idempotencyKey String               @unique
+  /// Phase 12: whether the policy engine's decision called for a customer
+  /// message. The AI message service checks this — never generates a message
+  /// the deterministic policy didn't ask for (Phase 12 §8).
+  requiresCustomerMessage Boolean     @default(false)
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
   executedAt     DateTime?
 
   outcome RecoveryOutcome?
+  message RecoveryMessage?
 
   @@index([paymentId])
   @@index([status, scheduledFor])
   @@map("recovery_actions")
+}
+
+/// Phase 12 §9 — a customer-facing message generated for an already-approved
+/// recovery action. At most one per action (idempotency; §10).
+model RecoveryMessage {
+  id               String                @id @default(cuid())
+  paymentId        String
+  payment          Payment               @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  recoveryActionId String                @unique
+  recoveryAction   RecoveryAction        @relation(fields: [recoveryActionId], references: [id], onDelete: Cascade)
+  channel          String                @default("SMS")
+  language         PreferredLanguage
+  content          String
+  /// Why this exact wording was chosen (from GeneratedMessage.reason, or the fallback note).
+  reason           String
+  source           RecoveryMessageSource
+  /// `message:{recoveryActionId}` — belt-and-suspenders alongside the unique FK above.
+  idempotencyKey   String                @unique
+  createdAt        DateTime              @default(now())
+
+  @@index([paymentId])
+  @@map("recovery_messages")
 }
 
 model RecoveryOutcome {

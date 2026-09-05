@@ -13,7 +13,8 @@
     "lint": "eslint src",
     "test": "vitest run",
     "run:experiment": "tsx ../../scripts/run-experiment.ts",
-    "run:evaluation": "tsx ../../scripts/run-evaluation.ts"
+    "run:evaluation": "tsx ../../scripts/run-evaluation.ts",
+    "run:storm": "tsx ../../scripts/gateway-storm-demo.ts"
   },
   "dependencies": {
     "@recovery-desk/classifier": "workspace:*",

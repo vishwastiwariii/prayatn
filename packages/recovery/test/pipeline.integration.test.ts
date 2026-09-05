@@ -4,13 +4,21 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { decideRecovery } from '../src/decide-service';
 import { enqueueRecoveryAction } from '../src/enqueue-service';
 import { executeRecoveryAction } from '../src/execute-service';
-import { createRecoveryQueue, createRecoveryWorker } from '../src/queue';
+import { createRecoveryQueue, createRecoveryWorker, enqueueRecoveryJob } from '../src/queue';
 import {
   closeRecoveryQueue,
   liveDecideDeps,
   liveEnqueueDeps,
   liveExecuteDeps,
 } from '../src/live-deps';
+
+/**
+ * Its own queue namespace. Two consumers on one BullMQ queue steal each other's
+ * jobs — correct behaviour, but it made this suite fail whenever a dev worker
+ * happened to be running. The enqueue SERVICE is still what's under test; only
+ * the destination queue is redirected.
+ */
+const TEST_QUEUE = `recovery-actions-test-${process.pid}`;
 
 /**
  * The real pipeline against real Postgres + Redis + BullMQ, with the mock
@@ -29,7 +37,7 @@ suite('recovery pipeline (integration)', () => {
   beforeAll(async () => {
     await prismaClient.$connect();
     // clear any stale jobs from a previous run
-    const q = createRecoveryQueue(process.env.REDIS_URL as string);
+    const q = createRecoveryQueue(process.env.REDIS_URL as string, TEST_QUEUE);
     await q.obliterate({ force: true }).catch(() => undefined);
     await q.close();
 
@@ -109,7 +117,12 @@ suite('recovery pipeline (integration)', () => {
     ids.action = decided.action.id;
 
     // POST /enqueue (immediate so the test does not wait 18 minutes)
-    const enq = await enqueueRecoveryAction(ids.action, liveEnqueueDeps, { immediate: true });
+    const testQueue = createRecoveryQueue(process.env.REDIS_URL as string, TEST_QUEUE);
+    const enq = await enqueueRecoveryAction(
+      ids.action,
+      { ...liveEnqueueDeps, enqueue: (data, delayMs) => enqueueRecoveryJob(testQueue, data, { delayMs }) },
+      { immediate: true },
+    );
     expect(enq.status).toBe('ENQUEUED');
 
     // Recovery worker with the mock gateway
@@ -120,7 +133,7 @@ suite('recovery pipeline (integration)', () => {
           ...liveExecuteDeps,
           gateway: createSimulator({ recoversOnAttempt: 2 }),
         }),
-      { concurrency: 1 },
+      { concurrency: 1, queueName: TEST_QUEUE },
     );
 
     try {
@@ -138,6 +151,7 @@ suite('recovery pipeline (integration)', () => {
       expect(completed.status).toBe('EXECUTED_SUCCESS');
     } finally {
       await worker.close();
+      await testQueue.close();
     }
 
     // Outcome + payment + audit

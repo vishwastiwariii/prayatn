@@ -1,4 +1,11 @@
-import { type Job, type JobsOptions, Queue, type RedisOptions, Worker } from 'bullmq';
+import {
+  DelayedError,
+  type Job,
+  type JobsOptions,
+  Queue,
+  type RedisOptions,
+  Worker,
+} from 'bullmq';
 
 /**
  * BullMQ wiring for the recovery pipeline.
@@ -60,8 +67,17 @@ export function parseRedisConnection(url: string): RedisOptions {
   };
 }
 
-export function createRecoveryQueue(redisUrl: string): Queue<RecoveryJobData, RecoveryJobResult> {
-  return new Queue<RecoveryJobData, RecoveryJobResult>(RECOVERY_QUEUE_NAME, {
+/**
+ * `queueName` exists so an integration test can run on its own namespace. Two
+ * consumers on the same queue steal each other's jobs — which is correct BullMQ
+ * behaviour, and exactly what made this suite flaky whenever a dev worker was
+ * running. Production always uses the default.
+ */
+export function createRecoveryQueue(
+  redisUrl: string,
+  queueName: string = RECOVERY_QUEUE_NAME,
+): Queue<RecoveryJobData, RecoveryJobResult> {
+  return new Queue<RecoveryJobData, RecoveryJobResult>(queueName, {
     connection: parseRedisConnection(redisUrl),
     defaultJobOptions: {
       ...INFRA_RETRY_OPTIONS,
@@ -91,14 +107,54 @@ export async function enqueueRecoveryJob(
 
 export function createRecoveryWorker(
   redisUrl: string,
-  processor: (job: Job<RecoveryJobData, RecoveryJobResult>) => Promise<RecoveryJobResult>,
-  opts: { concurrency?: number; autorun?: boolean } = {},
+  processor: (
+    job: Job<RecoveryJobData, RecoveryJobResult>,
+    token?: string,
+  ) => Promise<RecoveryJobResult>,
+  opts: { concurrency?: number; autorun?: boolean; queueName?: string } = {},
 ): Worker<RecoveryJobData, RecoveryJobResult> {
-  return new Worker<RecoveryJobData, RecoveryJobResult>(RECOVERY_QUEUE_NAME, processor, {
+  return new Worker<RecoveryJobData, RecoveryJobResult>(opts.queueName ?? RECOVERY_QUEUE_NAME, processor, {
     connection: { ...parseRedisConnection(redisUrl), maxRetriesPerRequest: null },
     concurrency: opts.concurrency ?? 4,
     autorun: opts.autorun ?? true,
   });
 }
 
+/** Shape returned by the execute-service for a circuit-blocked action. */
+export interface CircuitBlockedResult {
+  status: 'CIRCUIT_BLOCKED';
+  retryAfterSeconds: number;
+  trigger?: string;
+  circuitState?: string;
+}
+
+function isCircuitBlocked(
+  res: RecoveryJobResult | CircuitBlockedResult,
+): res is CircuitBlockedResult {
+  return res.status === 'CIRCUIT_BLOCKED';
+}
+
+/**
+ * Wrap `executeRecoveryAction` into a BullMQ processor.
+ *
+ * When the action is circuit-blocked, the SAME job is pushed into the future via
+ * `job.moveToDelayed` + `DelayedError` — never `sleep`, never a BullMQ auto-retry
+ * counting against `attempts`, and never a new job (so no double-charge risk).
+ */
+export function makeRecoveryProcessor(
+  run: (actionId: string) => Promise<RecoveryJobResult | CircuitBlockedResult>,
+  now: () => number = () => Date.now(),
+): (job: Job<RecoveryJobData, RecoveryJobResult>, token?: string) => Promise<RecoveryJobResult> {
+  return async (job, token) => {
+    const res = await run(job.data.actionId);
+    if (isCircuitBlocked(res)) {
+      const retryAfterSeconds = Math.max(1, Number(res.retryAfterSeconds ?? 30));
+      await job.moveToDelayed(now() + retryAfterSeconds * 1000, token);
+      throw new DelayedError();
+    }
+    return res;
+  };
+}
+
+export { DelayedError };
 export type { Job } from 'bullmq';
