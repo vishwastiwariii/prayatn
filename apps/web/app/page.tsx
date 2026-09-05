@@ -1,87 +1,48 @@
-'use client';
-
-import { useEffect, useState } from 'react';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
-
-type State = 'pending' | 'ok' | 'error';
-
-interface Health {
-  api: State;
-  postgres: State;
-  redis: State;
-}
-
-const LABELS: Record<State, string> = {
-  pending: 'Checking...',
-  ok: 'Online',
-  error: 'Unavailable',
-};
+import { Nav } from '@/components/nav';
+import { KpiHeader } from '@/components/dashboard/kpi-header';
+import { GatewayHealthCard } from '@/components/gateway/gateway-health-card';
+import { GatewayIncidentBanner } from '@/components/gateway/gateway-incident-banner';
+import { RecoveryActivity } from '@/components/dashboard/recovery-activity';
+import { RootCauseChart } from '@/components/dashboard/root-cause-chart';
+import { ActionDistributionChart } from '@/components/dashboard/action-distribution-chart';
+import { RecoveryFunnel } from '@/components/dashboard/recovery-funnel';
+import { NaiveVsRecoveryPanel } from '@/components/evaluation/naive-vs-recovery-panel';
+import { WhyWeOutperformed } from '@/components/evaluation/why-we-outperformed';
+import { HumanReviewPreview } from '@/components/payments/human-review-preview';
+import { PaymentTable } from '@/components/payments/payment-table';
 
 export default function Home() {
-  const [health, setHealth] = useState<Health>({
-    api: 'pending',
-    postgres: 'pending',
-    redis: 'pending',
-  });
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function check(): Promise<void> {
-      try {
-        const base = await fetch(`${API_URL}/health`, { cache: 'no-store' });
-        const apiOk = base.ok && (await base.json())?.status === 'ok';
-
-        let postgres: State = 'error';
-        let redis: State = 'error';
-        try {
-          const deps = await fetch(`${API_URL}/health/dependencies`, { cache: 'no-store' });
-          const body = await deps.json();
-          postgres = body?.dependencies?.postgres === 'ok' ? 'ok' : 'error';
-          redis = body?.dependencies?.redis === 'ok' ? 'ok' : 'error';
-        } catch {
-          // API reachable but the dependency check failed — leave both as error.
-        }
-
-        if (!cancelled) {
-          setHealth({ api: apiOk ? 'ok' : 'error', postgres, redis });
-        }
-      } catch {
-        if (!cancelled) {
-          setHealth({ api: 'error', postgres: 'error', redis: 'error' });
-        }
-      }
-    }
-
-    void check();
-    const timer = setInterval(() => void check(), 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, []);
-
   return (
-    <main>
-      <h1>Recovery Desk</h1>
-      <p className="subtitle">Foundation Online</p>
-      <ul>
-        <Row label="API" state={health.api} />
-        <Row label="PostgreSQL" state={health.postgres} />
-        <Row label="Redis" state={health.redis} />
-      </ul>
-    </main>
-  );
-}
+    <div className="min-h-screen">
+      <Nav />
+      <main className="mx-auto max-w-[1400px] space-y-4 px-4 py-4">
+        <GatewayIncidentBanner />
 
-function Row({ label, state }: { label: string; state: State }) {
-  return (
-    <li>
-      <span>{label}</span>
-      <span className="status" data-state={state}>
-        {LABELS[state]}
-      </span>
-    </li>
+        <KpiHeader />
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <GatewayHealthCard />
+          <div className="lg:col-span-2">
+            <RecoveryActivity />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <RootCauseChart />
+          <ActionDistributionChart />
+        </div>
+
+        <RecoveryFunnel />
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <NaiveVsRecoveryPanel compact />
+          <WhyWeOutperformed />
+        </div>
+
+        <HumanReviewPreview />
+
+        <PaymentTable />
+      </main>
+    </div>
   );
 }
