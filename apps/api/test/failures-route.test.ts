@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../src/app';
-import type { Env } from '../src/env';
+import { testEnv } from './_env';
 
 /**
  * Edge-only tests for POST /api/payments/failures: the header and body
@@ -9,15 +9,6 @@ import type { Env } from '../src/env';
  * so they run without a database. The persist / duplicate / audit path is
  * covered by the manual Phase 4 verification (needs docker compose up).
  */
-const testEnv: Env = {
-  DATABASE_URL: 'postgresql://user:pass@localhost:5432/db',
-  REDIS_URL: 'redis://localhost:6379',
-  API_PORT: 4000,
-  API_HOST: '0.0.0.0',
-  CORS_ORIGIN: 'http://localhost:3000',
-  LOG_LEVEL: 'silent',
-};
-
 const validFlatBody = {
   paymentId: 'pay_123',
   amount: 2500,
