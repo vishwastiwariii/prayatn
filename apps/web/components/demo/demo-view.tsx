@@ -34,7 +34,7 @@ export function DemoView() {
       <header className="border-b border-border bg-surface-1">
         <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-4 px-4 py-4">
           <div>
-            <h1 className="text-xl font-semibold tracking-tight text-text-primary">Recovery Desk</h1>
+            <h1 className="text-xl font-semibold tracking-tight text-text-primary">Prayatn</h1>
             <p className="text-sm text-text-secondary">Intelligent payment failure recovery</p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
