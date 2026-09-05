@@ -158,23 +158,3 @@ pnpm dev
 ```
 
 Then open the dashboard and run the demo.
-
-## The Idea
-
-Most payment systems treat failure as:
-
-```text
-FAIL → RETRY → RETRY → RETRY
-```
-
-Prayatn treats it as:
-
-FAIL
- ↓
-UNDERSTAND
- ↓
-DECIDE
- ↓
-WAIT / RETRY / SWITCH / MESSAGE / STOP
- ↓
-RECOVER
